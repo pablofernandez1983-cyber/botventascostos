@@ -16,7 +16,7 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SHEET_ID = os.environ["SHEET_ID"]
 GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
 
 # ─────────────────────────────────────────
 # Setup de logging
