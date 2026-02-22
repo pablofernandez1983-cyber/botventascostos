@@ -1,10 +1,10 @@
 import os
 import logging
-import re
+import json
+import httpx
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -14,7 +14,9 @@ from google.oauth2.service_account import Credentials
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SHEET_ID = os.environ["SHEET_ID"]
-GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]  # contenido del JSON como string
+GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 # ─────────────────────────────────────────
 # Setup de logging
@@ -23,16 +25,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────
-# Setup de Gemini
-# ─────────────────────────────────────────
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash-lite")
-
-# ─────────────────────────────────────────
 # Setup de Google Sheets
 # ─────────────────────────────────────────
-import json
-
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -42,6 +36,22 @@ def get_sheet():
     return sheet
 
 # ─────────────────────────────────────────
+# Llamada a Gemini por HTTP directo
+# ─────────────────────────────────────────
+async def llamar_gemini(prompt: str) -> str:
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+# ─────────────────────────────────────────
 # Función principal: procesar mensaje
 # ─────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,7 +59,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     usuario = update.message.from_user.first_name or update.message.from_user.username or "Desconocido"
     fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    # Prompt para Gemini
     prompt = f"""Analizá el siguiente mensaje sobre una operación comercial y respondé ÚNICAMENTE en este formato exacto:
 
 CLASIFICACION: VENTA o COSTO
@@ -60,10 +69,8 @@ Mensaje: "{mensaje}"
 Respondé solo con las dos líneas del formato, sin explicaciones adicionales."""
 
     try:
-        respuesta_gemini = model.generate_content(prompt)
-        respuesta_texto = respuesta_gemini.text.strip()
+        respuesta_texto = await llamar_gemini(prompt)
 
-        # Parsear respuesta
         clasificacion = "DESCONOCIDO"
         monto = "no especificado"
 
@@ -74,11 +81,9 @@ Respondé solo con las dos líneas del formato, sin explicaciones adicionales.""
             elif linea.upper().startswith("MONTO:"):
                 monto = linea.split(":", 1)[1].strip()
 
-        # Guardar en Google Sheets
         sheet = get_sheet()
         sheet.append_row([fecha, usuario, mensaje, clasificacion, monto])
 
-        # Armar respuesta para Telegram
         if clasificacion == "VENTA":
             emoji = "💰"
             texto_clasificacion = "venta"
