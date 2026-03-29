@@ -107,11 +107,38 @@ Respondé solo con las tres líneas del formato, sin explicaciones adicionales."
             elif linea.upper().startswith("DETALLE:"):
                 detalle = linea.split(":", 1)[1].strip()
 
-        # Parsear monto
+        # Parsear monto — maneja tanto formato español (1.234,56) como inglés (1234.56)
         monto_num = None
         if monto_str != "no especificado":
             try:
-                monto_num = float(monto_str.replace(".", "").replace(",", "."))
+                s = monto_str.strip().replace(" ", "").replace("$", "")
+                # Si tiene coma Y punto: determinar cuál es decimal
+                if "," in s and "." in s:
+                    if s.rfind(",") > s.rfind("."):
+                        # Formato español: 1.234,56
+                        s = s.replace(".", "").replace(",", ".")
+                    else:
+                        # Formato inglés: 1,234.56
+                        s = s.replace(",", "")
+                elif "," in s:
+                    # Solo coma: puede ser decimal español (522335,50) o miles (522,335)
+                    partes = s.split(",")
+                    if len(partes) == 2 and len(partes[1]) <= 2:
+                        # Es decimal: 522335,50
+                        s = s.replace(",", ".")
+                    else:
+                        # Es separador de miles: 522,335
+                        s = s.replace(",", "")
+                elif "." in s:
+                    # Solo punto: puede ser decimal inglés (522335.50) o miles español (1.234)
+                    partes = s.split(".")
+                    if len(partes) == 2 and len(partes[1]) <= 2:
+                        # Es decimal: 522335.50
+                        pass  # ya está bien
+                    else:
+                        # Es separador de miles español: 1.234.567
+                        s = s.replace(".", "")
+                monto_num = float(s)
             except ValueError:
                 monto_num = None
 
