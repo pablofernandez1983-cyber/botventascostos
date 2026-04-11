@@ -16,7 +16,7 @@ GEMINI_API_KEY           = os.environ["GEMINI_API_KEY"]
 SHEET_ID                 = os.environ.get("SHEET_ID", "1Eswje16JVngNEPTpq8f2-_2tjO8XAbsBBJnCIaqNkRY")
 GOOGLE_CREDENTIALS_JSON  = os.environ["GOOGLE_CREDENTIALS_JSON"]
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 MESES = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"]
 
