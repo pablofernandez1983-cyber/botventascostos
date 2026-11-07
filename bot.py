@@ -27,7 +27,17 @@ GEMINI_MODEL_FALLBACK   = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.5-fl
 ALLOWED_CHAT_IDS        = {c.strip() for c in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if c.strip()}
 
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
-SOLAPAS = {"VENTA": "Ventas", "COSTO": "Compra Materia prima - Producto"}
+# tipo → (solapa, columna del monto). VENTA/COSTO son el foco del bot; el resto solo si lo piden explícitamente.
+SOLAPAS = {"VENTA": ("Ventas", 2), "COSTO": ("Compra Materia prima - Producto", 3),
+           "SUELDO": ("Sueldos", 3), "AGENCIA": ("Publicidad", 3)}
+SOLAPA_MONO = "Monotributo"      # Fecha (aaaa-mm-01, texto) | Importe — una fila por mes
+TIPOS = list(SOLAPAS) + ["MONOTRIBUTO"]
+EXTRAS = ("SUELDO", "AGENCIA", "MONOTRIBUTO")
+LETRA = {"VENTA": "V", "COSTO": "C", "SUELDO": "S", "AGENCIA": "A", "MONOTRIBUTO": "M"}
+NOMBRE = {"VENTA": "Ventas", "COSTO": "Compras", "SUELDO": "Sueldos", "AGENCIA": "Agencia/Publicidad",
+          "MONOTRIBUTO": "Monotributo"}
+EMOJI = {"VENTA": "💰", "COSTO": "🛒", "SUELDO": "👩‍💼", "AGENCIA": "📣", "MONOTRIBUTO": "🧾"}
+EXTRAS_RE = re.compile(r"sueld|juli|aguinald|agencia|publicid|iniciativa|monotribut", re.I)
 FILAS_CONTEXTO = 40     # últimas filas de cada solapa que ve el modelo (para borrar)
 HISTORIAL_MAX = 8       # mensajes recientes de la charla que ve el modelo
 
@@ -106,9 +116,21 @@ def get_worksheet(nombre_solapa: str):
 
 def leer_filas(tipo: str, ultimas: int | None = None) -> list[dict]:
     """Filas de una solapa: [{fila, fecha, detalle, monto}] (fila = número real en el Sheet)."""
-    ws = get_worksheet(SOLAPAS[tipo])
-    vals = ws.get_all_values()
-    col = 2 if tipo == "VENTA" else 3
+    if tipo == "MONOTRIBUTO":
+        vals = get_worksheet(SOLAPA_MONO).get_all_values()
+        out = []
+        for i, r in enumerate(vals[1:], start=2):
+            m = parse_monto(r[1]) if len(r) > 1 else None
+            try:
+                d = date.fromisoformat(r[0].strip()[:10])
+            except (ValueError, IndexError):
+                d = parse_fecha(r[0]) if r else None
+            if m is None or d is None:
+                continue
+            out.append({"fila": i, "fecha": fecha_sheet(d), "detalle": "Monotributo", "monto": m})
+        return out[-ultimas:] if ultimas else out
+    solapa, col = SOLAPAS[tipo]
+    vals = get_worksheet(solapa).get_all_values()
     out = []
     for i, r in enumerate(vals[1:], start=2):
         if not r or not r[0].strip():
@@ -122,7 +144,18 @@ def leer_filas(tipo: str, ultimas: int | None = None) -> list[dict]:
 
 
 def agregar_fila(tipo: str, detalle: str, monto: float, d: date):
-    ws = get_worksheet(SOLAPAS[tipo])
+    if tipo == "MONOTRIBUTO":
+        # una fila por mes (día 1): si ese mes ya existe, se reemplaza el importe
+        ws = get_worksheet(SOLAPA_MONO)
+        clave = d.replace(day=1).isoformat()
+        existente = next((f for f in leer_filas("MONOTRIBUTO") if parse_fecha(f["fecha"]).isoformat()[:7] == clave[:7]), None)
+        if existente:
+            ws.update_cell(existente["fila"], 2, monto)
+        else:
+            ws.append_row([clave, monto], value_input_option="RAW")
+        logger.info(f"Monotributo {clave}: {monto}")
+        return
+    ws = get_worksheet(SOLAPAS[tipo][0])
     fila = [fecha_sheet(d), detalle, monto, ""] if tipo == "VENTA" else [fecha_sheet(d), detalle, "", monto]
     ws.append_row(fila, value_input_option="USER_ENTERED")
     logger.info(f"Escrito en '{ws.title}': {fila}")
@@ -131,7 +164,7 @@ def agregar_fila(tipo: str, detalle: str, monto: float, d: date):
 def borrar_fila(tipo: str, esperado: dict) -> bool:
     """Borra la fila que coincide con lo esperado. Primero prueba el número de fila
     guardado; si las filas se corrieron, la busca por contenido (de abajo hacia arriba)."""
-    ws = get_worksheet(SOLAPAS[tipo])
+    ws = get_worksheet(SOLAPA_MONO if tipo == "MONOTRIBUTO" else SOLAPAS[tipo][0])
     filas = leer_filas(tipo)
 
     def igual(f):
@@ -170,7 +203,7 @@ async def llamar_gemini(prompt: str) -> dict:
     raise ultimo_error
 
 
-def armar_prompt(mensaje: str, historial: list[str], ventas: list[dict], costos: list[dict]) -> str:
+def armar_prompt(mensaje: str, historial: list[str], tablas: dict) -> str:
     d = hoy()
     dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -179,18 +212,27 @@ def armar_prompt(mensaje: str, historial: list[str], ventas: list[dict], costos:
                          for f in filas) or "(vacía)"
 
     hist = "\n".join(historial[-HISTORIAL_MAX:]) or "(sin mensajes previos)"
+    bloques = "\n\n".join(
+        f"Últimas filas de {NOMBRE[t].upper()} ({LETRA[t]}<n° de fila> | fecha | detalle | monto):\n"
+        + tabla(f, LETRA[t]) for t, f in tablas.items())
+    extras = any(t in tablas for t in EXTRAS)
+    tipos_txt = '"VENTA"|"COSTO"' + ('|"SUELDO"|"AGENCIA"|"MONOTRIBUTO"' if extras else "")
+    reglas_extra = ("""- SUELDO → solapa "Sueldos": sueldo y aguinaldo de Juli (detalle "sueldo juli" / "aguinaldo juli").
+- AGENCIA → solapa "Publicidad": pago a la agencia de publicidad (detalle "agencia").
+- MONOTRIBUTO → una línea por mes con el importe del monotributo (fecha = día 1 del mes; cargar un mes que
+  ya existe reemplaza el importe, así que para cambiarlo alcanza con AGREGAR ese mes con el importe nuevo).
+Estos tres tipos SOLO se usan si el mensaje habla explícitamente de sueldo/Juli/aguinaldo, agencia/publicidad o
+monotributo. Nunca clasifiques una compra o venta común como uno de ellos.""" if extras
+                    else "Este bot es de compras y ventas: no uses otros tipos.")
     return f"""Sos el asistente que registra ventas y costos de Hechizo, una tienda de bijouterie de Buenos Aires,
 en un Google Sheet. Hoy es {dias[d.weekday()]} {d.isoformat()}.
 
 Solapas:
 - VENTA → "Ventas" (ventas en el showroom, ventas por fuera de la tienda online, etc.)
 - COSTO → "Compra Materia prima - Producto" (compras a proveedores, materiales, importaciones, pagos de mercadería)
+{reglas_extra}
 
-Últimas filas de VENTAS (V<n° de fila> | fecha | detalle | monto):
-{tabla(ventas, "V")}
-
-Últimas filas de COSTOS (C<n° de fila> | fecha | detalle | monto):
-{tabla(costos, "C")}
+{bloques}
 
 Charla reciente (para entender respuestas a preguntas tuyas):
 {hist}
@@ -200,9 +242,9 @@ Mensaje nuevo del usuario: "{mensaje}"
 Decidí qué hacer y respondé SOLO un JSON con esta forma:
 {{
   "accion": "AGREGAR" | "BORRAR" | "CONSULTAR" | "PREGUNTAR" | "OTRO",
-  "agregar": [{{"tipo": "VENTA"|"COSTO", "monto": número, "detalle": "texto corto en español (máx 50 caracteres)", "fecha": "YYYY-MM-DD"}}],
-  "borrar": [{{"tipo": "VENTA"|"COSTO", "fila": número de fila de las tablas de arriba}}],
-  "consulta": {{"tipo": "VENTA"|"COSTO"|"AMBOS", "desde": "YYYY-MM-DD", "hasta": "YYYY-MM-DD", "buscar": "palabra para filtrar el detalle o vacío"}},
+  "agregar": [{{"tipo": {tipos_txt}, "monto": número, "detalle": "texto corto en español (máx 50 caracteres)", "fecha": "YYYY-MM-DD"}}],
+  "borrar": [{{"tipo": {tipos_txt}, "fila": número de fila de las tablas de arriba}}],
+  "consulta": {{"tipo": {tipos_txt}|"AMBOS", "desde": "YYYY-MM-DD", "hasta": "YYYY-MM-DD", "buscar": "palabra para filtrar el detalle o vacío"}},
   "pregunta": "texto de la pregunta (solo si accion=PREGUNTAR)",
   "respuesta": "texto breve (solo si accion=OTRO)"
 }}
@@ -212,7 +254,7 @@ Reglas:
   "el 15 de octubre", "en septiembre" (si dice solo el mes, usá el último día de ese mes si ya pasó, o hoy si es el mes actual).
   Nunca inventes fechas futuras. Montos en pesos: "15 lucas" = 15000, "1,2 palos" = 1200000, "1.234,56" = 1234.56.
 - BORRAR: cuando pide borrar, eliminar, sacar o corregir una línea ("me equivoqué", "borrá la última", "sacá la de Dharma de 113500").
-  Elegí SOLO filas de las tablas de arriba que coincidan. "La última" = la fila con número más alto de la solapa que corresponda
+  Elegí SOLO filas de las tablas de arriba que coincidan (V=ventas, C=compras, S=sueldos, A=agencia, M=monotributo). "La última" = la fila con número más alto de la solapa que corresponda
   (si no se sabe la solapa, la última que se habló en la charla). Si pide CORREGIR un monto o dato, devolvé la fila a borrar en
   "borrar" y la línea corregida en "agregar" (accion "BORRAR"); el bot pide confirmación antes de tocar nada.
 - CONSULTAR: cuando pide ver, mostrar, listar o sumar movimientos ("los últimos 7 días", "cuánto vendí en octubre",
@@ -248,7 +290,7 @@ def consultar(c: dict) -> str:
     except (TypeError, ValueError):
         hasta = hoy()
     buscar = str(c.get("buscar") or "").strip().lower()
-    tipos = ["VENTA", "COSTO"] if tipo not in SOLAPAS else [tipo]
+    tipos = [tipo] if tipo in TIPOS else ["VENTA", "COSTO"]
     partes = [f"📊 Movimientos del {fecha_sheet(desde)} al {fecha_sheet(hasta)}" + (f" con «{buscar}»" if buscar else "")]
     for t in tipos:
         filas = []
@@ -257,7 +299,7 @@ def consultar(c: dict) -> str:
             if d and desde <= d <= hasta and (not buscar or buscar in f["detalle"].lower()):
                 filas.append((d, f))
         filas.sort(key=lambda x: x[0])
-        titulo = "💰 Ventas" if t == "VENTA" else "🛒 Compras / costos"
+        titulo = f"{EMOJI[t]} {NOMBRE[t]}"
         total = sum(f["monto"] for _, f in filas)
         partes.append(f"\n{titulo}: {len(filas)} movimientos · total {fmt_monto(total)}")
         mostrar = filas[-40:]
@@ -268,8 +310,7 @@ def consultar(c: dict) -> str:
 
 
 def describir(tipo, fecha, detalle, monto):
-    emoji = "💰" if tipo == "VENTA" else "🛒"
-    return f"{emoji} {fecha} · {detalle} · {fmt_monto(monto)}"
+    return f"{EMOJI.get(tipo, '•')} {fecha} · {detalle} · {fmt_monto(monto)}"
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -277,9 +318,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     mensaje = update.message.text
     try:
-        ventas = leer_filas("VENTA", FILAS_CONTEXTO)
-        costos = leer_filas("COSTO", FILAS_CONTEXTO)
-        res = await llamar_gemini(armar_prompt(mensaje, context.chat_data.get("historial", []), ventas, costos))
+        tablas = {t: leer_filas(t, FILAS_CONTEXTO) for t in ("VENTA", "COSTO")}
+        # sueldos/agencia/monotributo solo entran si los mencionan (en el mensaje o en la charla reciente)
+        reciente = " ".join([mensaje] + context.chat_data.get("historial", [])[-2:])
+        if EXTRAS_RE.search(reciente):
+            for t in EXTRAS:
+                tablas[t] = leer_filas(t, 12)
+        res = await llamar_gemini(armar_prompt(mensaje, context.chat_data.get("historial", []), tablas))
         recordar(context, "Usuario", mensaje)
         accion = str(res.get("accion", "")).upper()
 
@@ -304,7 +349,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if accion == "BORRAR":
-            por_fila = {("VENTA", f["fila"]): f for f in ventas} | {("COSTO", f["fila"]): f for f in costos}
+            por_fila = {(t, f["fila"]): f for t, filas in tablas.items() for f in filas}
             pedidos = [(str(b.get("tipo", "")).upper(), int(b.get("fila", 0))) for b in res.get("borrar", []) or []]
             encontrados = [(t, por_fila[(t, n)]) for t, n in pedidos if (t, n) in por_fila]
             if not encontrados:
@@ -343,7 +388,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     d = hoy()
                 if d > hoy():
                     d = hoy()
-                if tipo not in SOLAPAS or monto is None or monto <= 0:
+                if tipo not in TIPOS or monto is None or monto <= 0:
                     problemas.append(a)
                     continue
                 detalle = (a.get("detalle") or mensaje)[:50]
@@ -355,7 +400,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"🤔 {txt}")
                 return
             lineas = ["✅ Grabé:"] + [describir(g["tipo"], g["fecha"], g["detalle"], g["monto"]) +
-                                      f"  ({'Ventas' if g['tipo'] == 'VENTA' else 'Compras'})" for g in grabadas]
+                                      f"  ({NOMBRE[g['tipo']]})" for g in grabadas]
             if problemas:
                 lineas.append("⚠️ Hubo una parte que no entendí, ¿me la repetís?")
             lineas.append("Si me equivoqué, decime 'borrá la última' o qué corregir.")

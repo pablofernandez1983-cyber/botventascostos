@@ -16,6 +16,7 @@ Gemini recibe el mensaje + las últimas 40 filas de cada solapa + la charla reci
 - **CONSULTAR**: lista y totaliza movimientos por rango de fechas / tipo / palabra.
 - **PREGUNTAR**: si hay duda (falta monto, no se sabe si es venta o costo, varias filas posibles) pregunta en vez de adivinar.
 VENTA → hoja `"Ventas"` (col C) / COSTO → `"Compra Materia prima - Producto"` (col D).
+**Solo si se piden explícitamente** (regex `EXTRAS_RE`: sueldo/Juli/aguinaldo/agencia/publicidad/monotributo en el mensaje o los 2 últimos de la charla): SUELDO → `"Sueldos"`, AGENCIA → `"Publicidad"` (col D, mismo formato que compras) y MONOTRIBUTO → solapa `"Monotributo"` (Fecha `aaaa-mm-01` texto | Importe; una fila por mes, cargar un mes existente reemplaza el importe). Desde 7/11/2026 el reporte lee el monotributo de esa solapa (antes de S3 `monotributo.json`, que queda de respaldo).
 Fecha "hoy" en hora Argentina (antes usaba UTC del servidor).
 
 ## Conexión con el ecosistema Hechizo
