@@ -32,6 +32,8 @@ FILAS_CONTEXTO = 40     # últimas filas de cada solapa que ve el modelo (para b
 HISTORIAL_MAX = 8       # mensajes recientes de la charla que ve el modelo
 
 logging.basicConfig(level=logging.INFO)
+# httpx loguea cada URL completa: incluye el token de Telegram y la key de Gemini → silenciarlo
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -157,14 +159,14 @@ async def llamar_gemini(prompt: str) -> dict:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
             async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(f"{url}?key={GEMINI_API_KEY}", json=payload)
+                r = await client.post(url, json=payload, headers={"x-goog-api-key": GEMINI_API_KEY})
                 r.raise_for_status()
                 texto = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
             texto = re.sub(r"^```(?:json)?|```$", "", texto).strip()
             return json.loads(texto)
         except Exception as e:
             ultimo_error = e
-            logger.warning(f"Falló {modelo}: {e}")
+            logger.warning(f"Falló {modelo}: {type(e).__name__}")
     raise ultimo_error
 
 
